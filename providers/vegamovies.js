@@ -3,7 +3,7 @@ const cheerio = require('cheerio-without-node-native');
 const PROVIDER_NAME = 'Vegamovies';
 let baseUrl = 'https://vegamovies.pages.dev'; // Fallback base URL
 const TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
-const DOMAINS_JSON_URL = 'https://raw.githubusercontent.com/swagkaran/nvega/main/domains.json';
+const DOMAINS_JSON_URL = 'https://raw.githubusercontent.com/anime239/All-in-One-Nuvio/main/domains.json';
 const REQUEST_TIMEOUT = 12000;
 
 const HEADERS = {
