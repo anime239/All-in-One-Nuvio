@@ -474,6 +474,28 @@
       ]
     },
     {
+      "id": "hdmoviehub",
+      "name": "HdMovieHub",
+      "description": "Direct links from HdMovieHub with high-speed download support",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/hdmoviehub.js",
+      "enabled": true,
+      "formats": [
+        "mkv",
+        "mp4"
+      ],
+      "logo": "https://hdmoviehub.institute/wp-content/uploads/2022/10/cropped-cropped-HUB-Flix_page-0001-removebg-preview.png",
+      "contentLanguage": [
+        "en",
+        "hi"
+      ]
+    },
+    {
       "id": "hianime",
       "name": "HiAnime",
       "description": "HiAnime multi-server anime streaming with real-time mapping and subtitles",
