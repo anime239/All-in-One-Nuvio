@@ -1,287 +1,589 @@
+
 const cheerio = require('cheerio-without-node-native');
 
 const PROVIDER_NAME = 'HdMovieHub';
 const BASE_URL = 'https://hdmoviehub.institute';
 const TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
-const REQUEST_TIMEOUT = 12000;
+const REQUEST_TIMEOUT = 15000;
 
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9'
 };
 
-const MOBILE_UAS = [
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-  'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
-  'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36'
-];
+const LINK_HOSTS = /hubcloud|vcloud|nexdrive|workers\.dev|drive\.google|gdflix|gofile|dood|streamwish|vidhide|filepress|pixeldrain|lithub\.pro/i;
 
-function getMobileHeaders() {
-  const ua = MOBILE_UAS[Math.floor(Math.random() * MOBILE_UAS.length)];
-  return {
-    'User-Agent': ua,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': BASE_URL + '/'
-  };
+function cleanText(value) {
+  return String(value || '')
+    .replace(/&nbsp;|\u00a0/g, ' ')
+    .replace(/&#8211;|&#8212;|&ndash;|&mdash;/g, '-')
+    .replace(/&#8217;|&rsquo;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-async function fetchSafe(url, options = {}, timeoutMs = REQUEST_TIMEOUT) {
+function absoluteUrl(value, base = BASE_URL) {
+  if (!value) return '';
   try {
-    const fetchOptions = {
-      ...options,
-      headers: {
-        ...HEADERS,
-        ...(options.headers || {}),
-        'Accept-Encoding': 'identity'
-      }
-    };
-    const fetchPromise = fetch(url, fetchOptions);
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('timeout')), timeoutMs)
-    );
-    return await Promise.race([fetchPromise, timeoutPromise]);
-  } catch (err) {
-    console.error(`[${PROVIDER_NAME}] fetchSafe error: ${url.substring(0, 60)} -> ${err.message}`);
-    return null;
+    return new URL(value, base).href;
+  } catch (_) {
+    return '';
   }
 }
 
-async function fetchJson(url, options = {}) {
+function unwrapUrl(value) {
+  const url = absoluteUrl(value);
+  if (!url) return '';
+
   try {
-    const res = await fetchSafe(url, options);
-    if (!res || !res.ok) return null;
-    const text = await res.text();
-    return JSON.parse(text);
-  } catch (e) {
+    const parsed = new URL(url);
+
+    if (parsed.hostname.endsWith('href.li')) {
+      const raw = url.split('?')[1];
+      return raw ? decodeURIComponent(raw) : url;
+    }
+  } catch (_) {}
+
+  return url;
+}
+
+function qualityFrom(value) {
+  const text = String(value || '');
+  const match = text.match(/(2160|1440|1080|720|480|360)\s*p?/i);
+
+  if (match) return `${match[1]}p`;
+  if (/4k|uhd/i.test(text)) return '2160p';
+  if (/web.?dl|bluray|webrip|hdrip|hd/i.test(text)) return 'HD';
+
+  return 'HD';
+}
+
+function resolutionWeight(quality) {
+  const number = parseInt(String(quality).replace(/\D/g, ''), 10) || 720;
+
+  if (number >= 2160) return 4;
+  if (number >= 1080) return 3;
+  if (number >= 720) return 2;
+
+  return 1;
+}
+
+async function fetchResponse(url, options = {}, timeout = REQUEST_TIMEOUT) {
+  if (!url) return null;
+
+  const controller = typeof AbortController !== 'undefined'
+    ? new AbortController()
+    : null;
+
+  let timer;
+
+  try {
+    const response = await Promise.race([
+      fetch(url, {
+        ...options,
+        redirect: 'follow',
+        signal: controller ? controller.signal : undefined,
+        headers: {
+          ...HEADERS,
+          ...(options.headers || {})
+        }
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), timeout);
+      })
+    ]);
+
+    return response && response.ok ? response : null;
+  } catch (_) {
+    if (controller) controller.abort();
     return null;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
 async function fetchHtml(url, options = {}) {
+  const response = await fetchResponse(url, options);
+  if (!response) return null;
+
   try {
-    const res = await fetchSafe(url, options);
-    if (!res || !res.ok) return null;
-    const text = await res.text();
-    return cheerio.load(text);
-  } catch (e) {
+    return cheerio.load(await response.text());
+  } catch (_) {
     return null;
   }
 }
 
-function fixUrl(url) {
-  if (!url) return '';
-  if (url.startsWith('http://') || url.startsWith('https://')) return url;
-  if (url.startsWith('//')) return 'https:' + url;
-  if (url.startsWith('/')) return BASE_URL + url;
-  return BASE_URL + '/' + url;
+async function fetchJson(url) {
+  const response = await fetchResponse(url, {
+    headers: { Accept: 'application/json' }
+  });
+
+  if (!response) return null;
+
+  try {
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
 }
 
-function parseQuality(str) {
-  const s = String(str || '');
-  const match = s.match(/(2160|1080|720|480)\s*P/i);
-  if (match) return match[1].toLowerCase() + 'p';
-  if (/4K|UHD/i.test(s)) return '2160p';
-  if (/1440|2K/i.test(s)) return '1440p';
-  return 'HD';
+function isTv(type) {
+  return ['tv', 'series', 'show'].includes(
+    String(type || '').toLowerCase()
+  );
 }
 
-function decodeEntities(str) {
-  if (!str) return '';
-  return str
-    .replace(/&#8211;/g, '-')
-    .replace(/&#8212;/g, '-')
-    .replace(/&#038;/g, '&')
-    .replace(/&#8217;/g, "'")
-    .replace(/&amp;/g, '&')
-    .replace(/&ndash;/g, '-')
-    .replace(/&mdash;/g, '-')
-    .replace(/&quot;/g, '"');
-}
+async function getTMDBInfo(id, type) {
+  const value = String(id || '').trim();
+  const media = isTv(type) ? 'tv' : 'movie';
 
-function makeStream(serverName, titleInfo, streamUrl, quality, reqHeaders) {
-  const cleanTitle = decodeEntities(titleInfo || '').replace(/[\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-  const resWeight = quality.includes('2160') || quality.includes('4k') ? 3 : quality.includes('1080') ? 2 : 1;
+  if (!value) return null;
+
+  if (value.startsWith('tt')) {
+    const found = await fetchJson(
+      `https://api.themoviedb.org/3/find/${encodeURIComponent(value)}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
+    );
+
+    const result = found && (
+      media === 'tv' ? found.tv_results : found.movie_results
+    );
+
+    const item = result && result[0];
+
+    if (item) {
+      return {
+        title: media === 'tv' ? item.name : item.title,
+        year: String(
+          (item.first_air_date || item.release_date || '').slice(0, 4)
+        ),
+        imdbId: value,
+        tmdbId: item.id
+      };
+    }
+
+    return {
+      title: '',
+      year: '',
+      imdbId: value,
+      tmdbId: null
+    };
+  }
+
+  const data = await fetchJson(
+    `https://api.themoviedb.org/3/${media}/${encodeURIComponent(value)}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`
+  );
+
+  if (!data) return null;
 
   return {
-    name: `${PROVIDER_NAME} | ${quality} | ${serverName}`,
-    title: `${cleanTitle}\n${serverName} - Stream`,
-    url: streamUrl || '',
-    _resWeight: resWeight,
+    title: media === 'tv' ? data.name : data.title,
+    year: String(
+      (data.first_air_date || data.release_date || '').slice(0, 4)
+    ),
+    imdbId: data.imdb_id ||
+      (data.external_ids && data.external_ids.imdb_id) || '',
+    tmdbId: data.id
+  };
+}
+
+function normalizeTitle(value) {
+  return cleanText(value)
+    .replace(/^download\s+/i, '')
+    .replace(/\b(480|720|1080|1440|2160)p?\b/gi, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function titleScore(candidate, expected, year) {
+  const a = normalizeTitle(candidate);
+  const b = normalizeTitle(expected);
+
+  if (!a || !b) return 0;
+
+  let score = 0;
+
+  if (a === b) {
+    score += 100;
+  } else if (a.includes(b) || b.includes(a)) {
+    score += 65;
+  } else {
+    const aw = new Set(a.split(' '));
+    const bw = b.split(' ');
+    const overlap = bw.filter(
+      word => word.length > 1 && aw.has(word)
+    ).length;
+
+    score += Math.round(
+      (overlap / Math.max(1, bw.length)) * 55
+    );
+  }
+
+  if (year && String(candidate).includes(String(year))) {
+    score += 25;
+  }
+
+  return score;
+}
+
+async function searchByTitle(title, year) {
+  if (!title) return [];
+
+  const query = cleanText(`${title} ${year || ''}`);
+  const url = `${BASE_URL}/?s=${encodeURIComponent(query)}`;
+
+  const $ = await fetchHtml(url, {
+    headers: { Referer: `${BASE_URL}/` }
+  });
+
+  if (!$) return [];
+
+  const results = [];
+
+  $('article.generate-columns-container article.generate-columns, .generate-columns-container article.generate-columns, article.generate-columns')
+    .each((_, element) => {
+      const card = $(element);
+      const titleLink = card.find('.entry-title a').first();
+      const link = titleLink.attr('href');
+      const titleText = cleanText(
+        titleLink.text() || titleLink.attr('title')
+      );
+
+      const image = card.find(
+        '.post-image img, img.wp-post-image'
+      ).first();
+
+      const poster =
+        image.attr('data-src') ||
+        image.attr('data-lazy-src') ||
+        image.attr('data-original') ||
+        image.attr('src') ||
+        image.attr('data-srcset') ||
+        image.attr('srcset') ||
+        '';
+
+      if (!link || !titleText) return;
+
+      results.push({
+        title: titleText,
+        permalink: absoluteUrl(link),
+        poster: absoluteUrl(
+          String(poster).split(',')[0].trim().split(' ')[0]
+        ),
+        year: (
+          titleText.match(/\b(?:19|20)\d{2}\b/) || []
+        )[0] || ''
+      });
+    });
+
+  const seen = new Set();
+
+  return results.filter(item => {
+    if (!item.permalink || seen.has(item.permalink)) return false;
+
+    seen.add(item.permalink);
+    return true;
+  });
+}
+
+function choosePost(posts, info, type, season) {
+  if (!posts.length) return null;
+
+  const expected = info.title || '';
+
+  const ranked = posts.map(post => {
+    let score = titleScore(post.title, expected, info.year);
+
+    if (isTv(type) && season) {
+      const pattern = new RegExp(
+        `(?:season|s)\\s*0*${Number(season)}\\b`,
+        'i'
+      );
+
+      if (pattern.test(post.title)) {
+        score += 50;
+      } else if (/season|s\d{1,2}/i.test(post.title)) {
+        score -= 25;
+      }
+    }
+
+    return { post, score };
+  }).sort((a, b) => b.score - a.score);
+
+  return ranked[0].score >= 20 ? ranked[0].post : null;
+}
+
+function getQualityLinks($, postUrl) {
+  const links = [];
+
+  const selectors = [
+    'a.maxbutton-1',
+    'a.maxbutton-2',
+    'a.maxbutton-3',
+    'a.maxbutton-480p',
+    'a.maxbutton-720p',
+    'a.maxbutton-1080p',
+    'a.maxbutton'
+  ].join(', ');
+
+  $(selectors).each((_, element) => {
+    const anchor = $(element);
+    const href = unwrapUrl(anchor.attr('href'));
+
+    const label = cleanText(
+      anchor.find('.mb-text').text() ||
+      anchor.text() ||
+      anchor.attr('aria-label')
+    );
+
+    if (!href || !/^https?:\/\//i.test(href)) return;
+
+    links.push({
+      url: href,
+      label: label || 'Download',
+      quality: qualityFrom(label)
+    });
+  });
+
+  if (!links.length) {
+    $('.entry-content a[href]').each((_, element) => {
+      const anchor = $(element);
+      const href = unwrapUrl(anchor.attr('href'));
+      const label = cleanText(
+        anchor.text() || anchor.attr('title')
+      );
+
+      if (
+        !href ||
+        !/^https?:\/\//i.test(href) ||
+        !LINK_HOSTS.test(href)
+      ) return;
+
+      links.push({
+        url: href,
+        label: label || 'Download',
+        quality: qualityFrom(label)
+      });
+    });
+  }
+
+  const seen = new Set();
+
+  return links.filter(link => {
+    if (seen.has(link.url)) return false;
+
+    seen.add(link.url);
+    return true;
+  });
+}
+
+function collectOutboundLinks($, pageUrl) {
+  const links = [];
+
+  $('a[href], iframe[src], source[src]').each((_, element) => {
+    const node = $(element);
+    const raw = node.attr('href') || node.attr('src');
+    const url = unwrapUrl(absoluteUrl(raw, pageUrl));
+
+    if (url && LINK_HOSTS.test(url)) {
+      links.push(url);
+    }
+  });
+
+  const html = $.html();
+
+  const matches = html.match(
+    /https?:\\?\/\\?\/[a-z0-9.-]+(?:\\?\/\\?\/|\/)[^\s"'<>\\]+/gi
+  ) || [];
+
+  for (const match of matches) {
+    const url = match
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/g, '&');
+
+    if (LINK_HOSTS.test(url)) {
+      links.push(url);
+    }
+  }
+
+  return [...new Set(links)];
+}
+
+function makeStream(url, title, quality, referer) {
+  const host = (() => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch (_) {
+      return 'Server';
+    }
+  })();
+
+  return {
+    name: `${PROVIDER_NAME} | ${quality} | ${host}`,
+    title: `${cleanText(title)}\n${quality} - ${host}`,
+    url,
+    _resWeight: resolutionWeight(quality),
     behaviorHints: {
       notWebReady: true,
       proxyHeaders: {
-        request: reqHeaders || { 'Referer': BASE_URL + '/' }
+        request: {
+          Referer: referer || `${BASE_URL}/`
+        }
       }
     }
   };
 }
 
+async function resolveDownloadPage(
+  url,
+  title,
+  quality,
+  sourceReferer,
+  depth = 0
+) {
+  const streams = [];
+
+  if (!url || depth > 2) return streams;
+
+  const $ = await fetchHtml(url, {
+    headers: {
+      Referer: sourceReferer || `${BASE_URL}/`
+    }
+  });
+
+  if (!$) {
+    if (/\.(mp4|mkv|m3u8)(?:$|\?)/i.test(url)) {
+      streams.push(
+        makeStream(url, title, quality, sourceReferer)
+      );
+    }
+
+    return streams;
+  }
+
+  const links = collectOutboundLinks($, url);
+
+  for (const link of links) {
+    if (/\.(mp4|mkv|m3u8)(?:$|\?)/i.test(link)) {
+      streams.push(makeStream(link, title, quality, url));
+      continue;
+    }
+
+    if (depth < 2) {
+      const nested = await resolveDownloadPage(
+        link,
+        title,
+        quality,
+        url,
+        depth + 1
+      );
+
+      streams.push(...nested);
+    } else if (/hubcloud|vcloud|workers\.dev|nexdrive/i.test(link)) {
+      streams.push(makeStream(link, title, quality, url));
+    }
+  }
+
+  return streams;
+}
+
 function dedupe(streams) {
   const seen = new Set();
-  return (streams || []).filter(item => {
-    if (!item || !item.url || seen.has(item.url)) return false;
-    seen.add(item.url);
-    return true;
-  });
+
+  return streams
+    .filter(stream => {
+      if (!stream || !stream.url || seen.has(stream.url)) {
+        return false;
+      }
+
+      seen.add(stream.url);
+      return true;
+    })
+    .sort((a, b) => (b._resWeight || 0) - (a._resWeight || 0));
 }
 
-async function getTMDBInfo(id, type) {
-  const cleanId = String(id || '').trim();
-  const isImdb = cleanId.startsWith('tt');
-  const mediaType = type === 'tv' || type === 'series' ? 'tv' : 'movie';
-
+async function getStreams(
+  id,
+  type = 'movie',
+  season = null,
+  episode = null
+) {
   try {
-    if (isImdb) {
-      const res = await fetchJson(`https://api.themoviedb.org/3/find/${cleanId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`);
-      const results = res ? (mediaType === 'tv' ? res.tv_results : res.movie_results) : null;
-      if (results && results.length > 0) {
-        const item = results[0];
-        return {
-          title: mediaType === 'tv' ? item.name : item.title,
-          year: (item.first_air_date || item.release_date || '').split('-')[0],
-          imdbId: cleanId,
-          tmdbId: item.id
-        };
-      }
-      return { title: cleanId, year: null, imdbId: cleanId, tmdbId: null };
-    } else {
-      const res = await fetchJson(`https://api.themoviedb.org/3/${mediaType}/${cleanId}?api_key=${TMDB_API_KEY}&append_to_response=external_ids`);
-      if (res) {
-        return {
-          title: mediaType === 'tv' ? res.name : res.title,
-          year: (res.first_air_date || res.release_date || '').split('-')[0],
-          imdbId: res.imdb_id || (res.external_ids ? res.external_ids.imdb_id : null),
-          tmdbId: res.id
-        };
-      }
+    const info = await getTMDBInfo(id, type);
+
+    if (!info || !info.title) return [];
+
+    const queries = [info.title];
+
+    if (info.title.includes(':')) {
+      queries.push(info.title.split(':')[0].trim());
     }
-  } catch (e) {
-    console.error(`[${PROVIDER_NAME}] TMDB Lookup Error: ${e.message}`);
-  }
-  return { title: cleanId, year: null, imdbId: null, tmdbId: null };
-}
 
-async function searchByTitle(query, year) {
-  if (!query) return [];
-  const searchSlug = encodeURIComponent(query + (year ? ' ' + year : ''));
-  const searchUrl = `${BASE_URL}/?s=${searchSlug}`;
+    let posts = [];
 
-  const $ = await fetchHtml(searchUrl, { headers: getMobileHeaders() });
-  if (!$) return [];
+    for (const query of queries) {
+      posts = await searchByTitle(query, info.year);
 
-  const posts = [];
-  
-  // Directly targeting all grid blocks / article cards found in search page layout
-  $('article, .item, .post, div[class*="post"], div[class*="item"], .result-item').each((_, el) => {
-    const $card =$(el);
-    const $link =$card.find('a').first();
-    const href = $link.attr('href') \vert{}\vert{}$card.find('a[href*="institute"]').attr('href');
-    const title = $card.find('h2, h3, .title, .box-title, h2 a').text().trim() || $link.attr('title') \vert{}\vert{}$link.text().trim();
-
-    if (href && href.startsWith('http') && title.length > 3) {
-      const cleanTitle = title.replace(/Download\s*/gi, '').trim();
-      posts.push({
-        postId: href,
-        title: cleanTitle,
-        permalink: href,
-        year: (cleanTitle.match(/\b(19|20)\d{2}\b/) || [null])[0]
-      });
+      if (posts.length) break;
     }
-  });
 
-  // Comprehensive fallback across any structural content link anchors
-  if (posts.length === 0) {
-    $('a').each((_, el) => {
-      const $a =$(el);
-      const href = $a.attr('href');
-      const title = $a.text().trim() \vert{}\vert{}$a.attr('title') || '';
-      
-      if (href && href.startsWith(BASE_URL) && !href.includes('/page/') && title.length > 5) {
-        const cleanTitle = title.replace(/Download\s*/gi, '').trim();
-        posts.push({
-          postId: href,
-          title: cleanTitle,
-          permalink: href,
-          year: (cleanTitle.match(/\b(19|20)\d{2}\b/) || [null])[0]
-        });
-      }
+    if (!posts.length) return [];
+
+    const matched = choosePost(posts, info, type, season);
+
+    if (!matched) return [];
+
+    const $ = await fetchHtml(matched.permalink, {
+      headers: { Referer: `${BASE_URL}/` }
     });
-  }
 
-  return posts.filter((item, index, self) => 
-    index === self.findIndex((t) => t.permalink === item.permalink)
-  );
-}
+    if (!$) return [];
 
-async function extractSingleVc(url, referer, season, episode, title, qualityHint) {
-  const streams = [];
-  try {
-    const $ = await fetchHtml(url, { headers: { ...getMobileHeaders(), Referer: referer || BASE_URL + '/' } });
-    if (!$) return streams;
+    let qualityLinks = getQualityLinks($, matched.permalink);
 
-    $('a.btn, a.button, a').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const text = ($(el).text() || '').trim();
+    if (!qualityLinks.length) return [];
 
-      if (!href || href === '#' || href.toLowerCase().includes('javascript')) return;
+    if (isTv(type) && season && episode) {
+      const episodePattern = new RegExp(
+        `(?:s\\s*0*${Number(season)}\\s*e\\s*0*${Number(episode)}|season\\s*0*${Number(season)}[^\\d]{0,12}episode\\s*0*${Number(episode)})`,
+        'i'
+      );
 
-      if (href.includes('workers.dev') || href.includes('fsl') || href.includes('vcloud') || href.includes('hubcloud') || href.includes('drive')) {
-        const detectedQuality = parseQuality(text) || qualityHint || 'HD';
-        streams.push(makeStream(text || 'Cloud Server', title, href, detectedQuality, { Referer: url }));
-      }
-    });
-  } catch (e) {
-    console.error(`[${PROVIDER_NAME}] extractSingleVc Error: ${e.message}`);
-  }
-  return streams;
-}
+      const episodeLinks = qualityLinks.filter(link =>
+        episodePattern.test(link.label)
+      );
 
-async function extractFromPost(postHtml, season, episode, postTitle) {
-  const streams = [];
-  if (!postHtml) return streams;
-
-  const $ = cheerio.load(postHtml);
-  const linksToProcess = [];
-
-  $('a').each((_, el) => {
-    const href = $(el).attr('href');
-    const label = $(el).text().trim();
-    if (href && (href.includes('hubcloud') || href.includes('vcloud') || href.includes('nexdrive') || href.includes('workers.dev'))) {
-      linksToProcess.push({ href: fixUrl(href), label: label || postTitle, quality: parseQuality(label || postTitle) });
-    }
-  });
-
-  for (const item of linksToProcess) {
-    const foundStreams = await extractSingleVc(item.href, BASE_URL + '/', season, episode, item.label, item.quality);
-    streams.push(...foundStreams);
-  }
-
-  return streams;
-}
-
-async function getStreams(id, type, season, episode) {
-  try {
-    console.log(`[${PROVIDER_NAME}] Processing Request: ID=${id}, Type=${type}, S=${season}, E=${episode}`);
-
-    const tmdbInfo = await getTMDBInfo(id, type);
-    let searchResults = [];
-
-    if (tmdbInfo.imdbId) {
-      searchResults = await searchByTitle(tmdbInfo.imdbId, null);
-    }
-
-    if (searchResults.length === 0 && tmdbInfo.title) {
-      searchResults = await searchByTitle(tmdbInfo.title, null);
-
-      if (searchResults.length === 0 && tmdbInfo.title.includes(':')) {
-        const shortTitle = tmdbInfo.title.split(':')[0].trim();
-        searchResults = await searchByTitle(shortTitle, null);
+      if (episodeLinks.length) {
+        qualityLinks = episodeLinks;
       }
     }
 
-    if (searchResults.length === 0) {
-      console.log(`[${PROVIDER_NAME}] No post matching media title found.`);
-      return [];
+    const streams = [];
+
+    for (const link of qualityLinks) {
+      const resolved = await resolveDownloadPage(
+        link.url,
+        `${info.title}${info.year ? ` (${info.year})` : ''}`,
+        link.quality,
+        matched.permalink
+      );
+
+      streams.push(...resolved);
     }
+
+    return dedupe(streams);
+  } catch (_) {
+    return [];
+  }
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { getStreams };
+} else {
+  global.getStreams = getStreams;
+}
