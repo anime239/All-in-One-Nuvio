@@ -477,7 +477,7 @@
       "id": "hdmoviehub",
       "name": "HdMovieHub",
       "description": "Direct links from HdMovieHub with high-speed download support",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Nuvio Team",
       "supportedTypes": [
         "movie",
