@@ -172,12 +172,13 @@ async function searchByTitle(query, year) {
   if (!$) return [];
 
   const posts = [];
-  // Targets the specific grid post cards shown in the screenshot search results
-  $('article, .item, .post, div[class*="post"], div[class*="item"]').each((_, el) => {
-    const $card = $(el);
-    const $link = $card.find('a').first();
-    const href = $link.attr('href') || $card.find('a[href*="institute"]').attr('href');
-    const title = $card.find('h2, h3, .title, .box-title').text().trim() || $link.text().trim() || $card.text().trim();
+  
+  // Directly targeting all grid blocks / article cards found in search page layout
+  $('article, .item, .post, div[class*="post"], div[class*="item"], .result-item').each((_, el) => {
+    const $card =$(el);
+    const $link =$card.find('a').first();
+    const href = $link.attr('href') \vert{}\vert{}$card.find('a[href*="institute"]').attr('href');
+    const title = $card.find('h2, h3, .title, .box-title, h2 a').text().trim() || $link.attr('title') \vert{}\vert{}$link.text().trim();
 
     if (href && href.startsWith('http') && title.length > 3) {
       const cleanTitle = title.replace(/Download\s*/gi, '').trim();
@@ -190,17 +191,20 @@ async function searchByTitle(query, year) {
     }
   });
 
-  // Fallback broad anchor search if grid cards don't match
+  // Comprehensive fallback across any structural content link anchors
   if (posts.length === 0) {
     $('a').each((_, el) => {
-      const href = $(el).attr('href');
-      const title = $(el).text().trim();
-      if (href && href.includes('/?p=') || (href && href.startsWith(BASE_URL) && title.length > 5)) {
+      const $a =$(el);
+      const href = $a.attr('href');
+      const title = $a.text().trim() \vert{}\vert{}$a.attr('title') || '';
+      
+      if (href && href.startsWith(BASE_URL) && !href.includes('/page/') && title.length > 5) {
+        const cleanTitle = title.replace(/Download\s*/gi, '').trim();
         posts.push({
           postId: href,
-          title: title,
+          title: cleanTitle,
           permalink: href,
-          year: (title.match(/\b(19|20)\d{2}\b/) || [null])[0]
+          year: (cleanTitle.match(/\b(19|20)\d{2}\b/) || [null])[0]
         });
       }
     });
@@ -217,7 +221,6 @@ async function extractSingleVc(url, referer, season, episode, title, qualityHint
     const $ = await fetchHtml(url, { headers: { ...getMobileHeaders(), Referer: referer || BASE_URL + '/' } });
     if (!$) return streams;
 
-    // Scrapes the quality download buttons visible in the second screenshot
     $('a.btn, a.button, a').each((_, el) => {
       const href = $(el).attr('href') || '';
       const text = ($(el).text() || '').trim();
@@ -242,7 +245,6 @@ async function extractFromPost(postHtml, season, episode, postTitle) {
   const $ = cheerio.load(postHtml);
   const linksToProcess = [];
 
-  // Scrapes direct download buttons or redirect link containers on the post page
   $('a').each((_, el) => {
     const href = $(el).attr('href');
     const label = $(el).text().trim();
@@ -283,35 +285,3 @@ async function getStreams(id, type, season, episode) {
       console.log(`[${PROVIDER_NAME}] No post matching media title found.`);
       return [];
     }
-
-    let matchedPost = searchResults[0];
-    if (type === 'tv' && season) {
-      const seasonRegex = new RegExp(`(?:s|season)\\s*0*${season}\\b`, 'i');
-      const foundSeasonPost = searchResults.find(post => seasonRegex.test(post.title));
-      if (foundSeasonPost) {
-        matchedPost = foundSeasonPost;
-      }
-    }
-
-    const $post = await fetchHtml(matchedPost.permalink, { headers: getMobileHeaders() });
-    if (!$post) return [];
-
-    const extractedStreams = await extractFromPost(
-      $post.html(),
-      season ? Number(season) : null,
-      episode ? Number(episode) : null,
-      matchedPost.title
-    );
-
-    return dedupe(extractedStreams);
-  } catch (err) {
-    console.error(`[${PROVIDER_NAME}] Fatal getStreams error: ${err.message}`);
-    return [];
-  }
-}
-
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { getStreams };
-} else {
-  global.getStreams = getStreams;
-}
