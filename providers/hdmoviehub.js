@@ -385,33 +385,114 @@ function getQualityLinks($, postUrl) {
 function collectOutboundLinks($, pageUrl) {
   const links = [];
 
-  $('a[href], iframe[src], source[src]').each((_, element) => {
-    const node = $(element);
-    const raw = node.attr('href') || node.attr('src');
-    const url = unwrapUrl(absoluteUrl(raw, pageUrl));
+  const add = value => {
+    const url = unwrapUrl(absoluteUrl(value, pageUrl));
+    if (url && /^https?:\/\//i.test(url)) links.push(url);
+  };
 
-    if (url && LINK_HOSTS.test(url)) {
-      links.push(url);
-    }
+  $('a[href], iframe[src], source[src], video[src]').each((_, element) => {
+    const node = $(element);
+    add(node.attr('href') || node.attr('src'));
   });
 
   const html = $.html();
 
-  const matches = html.match(
-    /https?:\\?\/\\?\/[a-z0-9.-]+(?:\\?\/\\?\/|\/)[^\s"'<>\\]+/gi
-  ) || [];
+  const patterns = [
+    /(?:https?:)?\\?\/\\?\/[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s"'<>\\]*)?/gi,
+    /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/gi,
+    /(?:window\.)?location\.replace\(\s*["']([^"']+)["']\s*\)/gi
+  ];
 
-  for (const match of matches) {
-    const url = match
-      .replace(/\\\//g, '/')
-      .replace(/\\u0026/g, '&');
+  for (const pattern of patterns) {
+    let match;
 
-    if (LINK_HOSTS.test(url)) {
-      links.push(url);
+    while ((match = pattern.exec(html))) {
+      add(match[1] || match[0]);
     }
   }
 
   return [...new Set(links)];
+}
+
+function isPlayableUrl(url) {
+  if (!url) return false;
+
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.toLowerCase();
+
+    if (/\.(?:mp4|m4v|mkv|webm|mov|m3u8|mpd)$/.test(path)) {
+      return true;
+    }
+
+    if (/\.(?:zip|rar|7z|iso|exe|apk|pdf)$/.test(path)) {
+      return false;
+    }
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function isVerificationPage($, html) {
+  const text = cleanText(
+    `${$('title').text()} ${$('body').text()} ${html}`
+  ).toLowerCase();
+
+  return /captcha|click to verify|human verification|verify you are human|cloudflare turnstile|checking your browser/.test(text);
+}
+
+function extractRedirectTarget($, html, pageUrl) {
+  const candidates = [];
+
+  const add = value => {
+    if (!value) return;
+
+    const decoded = String(value)
+      .replace(/\\\//g, '/')
+      .replace(/&amp;/g, '&')
+      .replace(/\\u0026/g, '&');
+
+    const url = absoluteUrl(decoded, pageUrl);
+
+    if (url && /^https?:\/\//i.test(url)) {
+      candidates.push(url);
+    }
+  };
+
+  $('a[href], form[action], meta[http-equiv="refresh"]').each((_, el) => {
+    const node = $(el);
+
+    add(node.attr('href') || node.attr('action'));
+
+    const content = node.attr('content') || '';
+    const refresh = content.match(/url\s*=\s*['"]?([^;'" ]+)/i);
+
+    if (refresh) add(refresh[1]);
+  });
+
+  const patterns = [
+    /(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/gi,
+    /(?:window\.)?location\.replace\(\s*["']([^"']+)["']\s*\)/gi,
+    /(?:var\s+url|const\s+url|let\s+url)\s*=\s*["']([^"']+)["']/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+
+    while ((match = pattern.exec(html))) {
+      add(match[1]);
+    }
+  }
+
+  return [...new Set(candidates)].filter(url => {
+    try {
+      return new URL(url).hostname !== new URL(pageUrl).hostname;
+    } catch (_) {
+      return false;
+    }
+  });
 }
 
 function makeStream(url, title, quality, referer) {
@@ -439,53 +520,169 @@ function makeStream(url, title, quality, referer) {
   };
 }
 
-async function resolveDownloadPage(
-  url,
-  title,
-  quality,
-  sourceReferer,
-  depth = 0
-) {
+async function resolveDownloadPage(url, title, quality, sourceReferer) {
   const streams = [];
 
-  if (!url || depth > 2) return streams;
+  const queue = [{
+    url,
+    referer: sourceReferer || `${BASE_URL}/`,
+    depth: 0
+  }];
 
-  const $ = await fetchHtml(url, {
-    headers: {
-      Referer: sourceReferer || `${BASE_URL}/`
-    }
-  });
+  const visited = new Set();
+  const maxPages = 12;
 
-  if (!$) {
-    if (/\.(mp4|mkv|m3u8)(?:$|\?)/i.test(url)) {
-      streams.push(
-        makeStream(url, title, quality, sourceReferer)
-      );
-    }
+  while (queue.length && visited.size < maxPages) {
+    const current = queue.shift();
 
-    return streams;
-  }
-
-  const links = collectOutboundLinks($, url);
-
-  for (const link of links) {
-    if (/\.(mp4|mkv|m3u8)(?:$|\?)/i.test(link)) {
-      streams.push(makeStream(link, title, quality, url));
+    if (!current || !current.url || visited.has(current.url)) {
       continue;
     }
 
-    if (depth < 2) {
-      const nested = await resolveDownloadPage(
-        link,
-        title,
-        quality,
-        url,
-        depth + 1
-      );
+    visited.add(current.url);
 
-      streams.push(...nested);
-    } else if (/hubcloud|vcloud|workers\.dev|nexdrive/i.test(link)) {
-      streams.push(makeStream(link, title, quality, url));
+    if (isPlayableUrl(current.url)) {
+      streams.push(
+        makeStream(current.url, title, quality, current.referer)
+      );
+      continue;
+    }
+
+    let response;
+
+    try {
+      response = await fetchResponse(current.url, {
+        headers: { Referer: current.referer },
+        redirect: 'follow'
+      });
+    } catch (_) {
+      response = null;
+    }
+
+    if (!response) continue;
+
+    const finalUrl = response.url || current.url;
+
+    if (isPlayableUrl(finalUrl)) {
+      streams.push(
+        makeStream(finalUrl, title, quality, current.referer)
+      );
+      continue;
+    }
+
+    const contentType = String(
+      response.headers && response.headers.get('content-type') || ''
+    ).toLowerCase();
+
+    if (
+      !contentType.includes('text/html') &&
+      !contentType.includes('application/xhtml')
+    ) {
+      continue;
+    }
+
+    let html;
+
+    try {
+      html = await response.text();
+    } catch (_) {
+      continue;
+    }
+
+    const $ = cheerio.load(html);
+
+    if (isVerificationPage($, html)) {
+      continue;
+    }
+
+    const pageHost = (() => {
+      try {
+        return new URL(finalUrl).hostname.toLowerCase();
+      } catch (_) {
+        return '';
+      }
+    })();
+
+    if (pageHost.includes('pixeldrain')) {
+      const idMatch = finalUrl.match(/\/u\/([a-zA-Z0-9]+)/);
+
+      if (idMatch) {
+        const info = await fetchJson(
+          `https://pixeldrain.dev/api/file/${idMatch[1]}/info`
+        );
+
+        const filename = info && (info.name || info.filename) || '';
+
+        if (/\.(mp4|m4v|mkv|webm|mov)$/i.test(filename)) {
+          streams.push(
+            makeStream(
+              `https://pixeldrain.dev/api/file/${idMatch[1]}?download`,
+              title,
+              quality,
+              finalUrl
+            )
+          );
+        }
+      }
+    }
+
+    const links = collectOutboundLinks($, finalUrl);
+    const redirectTargets = extractRedirectTarget($, html, finalUrl);
+
+    const candidates = [...new Set([
+      ...links,
+      ...redirectTargets
+    ])];
+
+    for (const link of candidates) {
+      if (visited.has(link)) continue;
+
+      if (isPlayableUrl(link)) {
+        streams.push(makeStream(link, title, quality, finalUrl));
+        continue;
+      }
+
+      let host = '';
+
+      try {
+        host = new URL(link).hostname.toLowerCase();
+      } catch (_) {
+        continue;
+      }
+
+      if (/\.(zip|rar|7z|iso)(?:$|\?)/i.test(link)) {
+        continue;
+      }
+
+      if (/hdmoviehub|mhub\.lithub\.pro/.test(host)) {
+        if (current.depth < 2) {
+          queue.push({
+            url: link,
+            referer: finalUrl,
+            depth: current.depth + 1
+          });
+        }
+
+        continue;
+      }
+
+      if (/vcloud\.beer|pixeldrain|r2\.dev|cloudflarestorage\.com/.test(host)) {
+        queue.push({
+          url: link,
+          referer: finalUrl,
+          depth: current.depth + 1
+        });
+
+        continue;
+      }
+
+      if (LINK_HOSTS.test(host) && current.depth < 5) {
+        queue.push({
+          url: link,
+          referer: finalUrl,
+          depth: current.depth + 1
+        });
+      }
     }
   }
 
