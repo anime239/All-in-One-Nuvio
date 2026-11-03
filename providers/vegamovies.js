@@ -4,7 +4,7 @@ const PROVIDER_NAME = 'Vegamovies';
 const BASE_URL = 'https://veqamovies.cc';
 const TMDB_API_KEY = '439c478a771f35c05022f9feabcca01c';
 
-// This points directly to the domains.json file you created in File 1!
+// Points directly to your repository's raw domains.json
 const DOMAINS_JSON_URL = 'https://raw.githubusercontent.com/anime239/All-in-One-Nuvio/main/domains.json';
 const REQUEST_TIMEOUT = 12000;
 
@@ -292,8 +292,12 @@ async function getStreams(id, type, season, episode) {
     }
 
     if (searchResults.length === 0 && tmdbInfo.title) {
-      const searchTitle = (type === 'tv' && season) ? `${tmdbInfo.title} season ${season}` : tmdbInfo.title;
-      searchResults = await searchByTitle(searchTitle, tmdbInfo.year);
+      searchResults = await searchByTitle(tmdbInfo.title, null);
+
+      if (searchResults.length === 0 && tmdbInfo.title.includes(':')) {
+        const shortTitle = tmdbInfo.title.split(':')[0].trim();
+        searchResults = await searchByTitle(shortTitle, null);
+      }
     }
 
     if (searchResults.length === 0) {
@@ -301,7 +305,15 @@ async function getStreams(id, type, season, episode) {
       return [];
     }
 
-    const matchedPost = searchResults[0];
+    let matchedPost = searchResults[0];
+    if (type === 'tv' && season) {
+      const seasonRegex = new RegExp(`(?:s|season)\\s*0*${season}\\b`, 'i');
+      const foundSeasonPost = searchResults.find(post => seasonRegex.test(post.title));
+      if (foundSeasonPost) {
+        matchedPost = foundSeasonPost;
+      }
+    }
+
     const postDetails = await fetchJson(`${baseUrl}/wp-json/wp/v2/posts/${matchedPost.postId}`, { headers: getMobileHeaders() });
 
     if (!postDetails || !postDetails.content) return [];
