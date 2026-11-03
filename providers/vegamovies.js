@@ -27,7 +27,6 @@ const MOBILE_UAS = [
   'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36'
 ];
 
-// Built-in fallbacks just in case your github domains.json goes down
 const FALLBACK_VEGAMOVIES_DOMAINS = [
   'https://veqamovies.cc',
   'https://1vegamovies.asia',
@@ -217,20 +216,30 @@ async function getTMDBInfo(id, type) {
 async function searchByTitle(query, year) {
   if (!query) return [];
   const searchSlug = encodeURIComponent(query + (year ? ' ' + year : ''));
-  const searchUrl = `${baseUrl}/wp-json/wp/v2/posts?search=${searchSlug}&per_page=10`;
+  const searchUrl = `${baseUrl}/index.php?do=search&subaction=search&story=${searchSlug}`;
 
-  const posts = await fetchJson(searchUrl, { headers: getMobileHeaders() });
-  if (!Array.isArray(posts) || posts.length === 0) return [];
+  const $ = await fetchHtml(searchUrl, { headers: getMobileHeaders() });
+  if (!$) return [];
 
-  return posts.map(post => {
-    const postTitle = post.title?.rendered || '';
-    return {
-      postId: String(post.id || ''),
-      title: postTitle.replace(/Download\s*/gi, '').trim(),
-      permalink: post.link || '',
-      year: (postTitle.match(/\b(19|20)\d{2}\b/) || [null])[0]
-    };
+  const posts = [];
+  $('h2 a, h3 a, .title a, .post-title a, article a').each((_, el) => {
+    const href = $(el).attr('href');
+    const title = $(el).text().trim() || $(el).attr('title') || '';
+    
+    if (href && href.startsWith('http') && title.length > 5) {
+      const cleanTitle = title.replace(/Download\s*/gi, '').trim();
+      posts.push({
+        postId: href,
+        title: cleanTitle,
+        permalink: href,
+        year: (cleanTitle.match(/\b(19|20)\d{2}\b/) || [null])[0]
+      });
+    }
   });
+
+  return posts.filter((item, index, self) => 
+    index === self.findIndex((t) => t.permalink === item.permalink)
+  );
 }
 
 async function extractSingleVc(url, referer, season, episode, title, qualityHint) {
@@ -314,12 +323,12 @@ async function getStreams(id, type, season, episode) {
       }
     }
 
-    const postDetails = await fetchJson(`${baseUrl}/wp-json/wp/v2/posts/${matchedPost.postId}`, { headers: getMobileHeaders() });
+    const $post = await fetchHtml(matchedPost.permalink, { headers: getMobileHeaders() });
 
-    if (!postDetails || !postDetails.content) return [];
+    if (!$post) return [];
 
     const extractedStreams = await extractFromPost(
-      { content: postDetails.content.rendered, title: matchedPost.title },
+      { content: $post.html(), title: matchedPost.title },
       season ? Number(season) : null,
       episode ? Number(episode) : null
     );
